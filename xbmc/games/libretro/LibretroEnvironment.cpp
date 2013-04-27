@@ -29,21 +29,45 @@
 #include "settings/Settings.h"
 #include "storage/MediaManager.h"
 #include "utils/log.h"
+#include "utils/RegExp.h"
+#include "utils/StringUtils.h"
+
+#include <set>
+#include <sstream>
+#include <vector>
+
+#define SETTING_TYPE_NONE            (0 << 0)
+#define SETTING_TYPE_BOOL            (1 << 0)
+#define SETTING_TYPE_TEXT            (1 << 1)
+#define SETTING_TYPE_IPADDRESS       (1 << 2)
+#define SETTING_TYPE_NUMBER          (1 << 3)
+#define SETTING_TYPE_SLIDER_INT      (1 << 4)
+#define SETTING_TYPE_SLIDER_FLOAT    (1 << 5)
+#define SETTING_TYPE_SLIDER_PERCENT  (1 << 6)
+#define SETTING_TYPE_ENUM            (1 << 7)
 
 using namespace ADDON;
 using namespace XFILE;
+using namespace std;
 
-CLibretroEnvironment::SetPixelFormat_t      CLibretroEnvironment::fn_SetPixelFormat      = NULL;
-CLibretroEnvironment::SetKeyboardCallback_t CLibretroEnvironment::fn_SetKeyboardCallback = NULL;
+CLibretroEnvironment::SetPixelFormat_t         CLibretroEnvironment::fn_SetPixelFormat         = NULL;
+CLibretroEnvironment::SetKeyboardCallback_t    CLibretroEnvironment::fn_SetKeyboardCallback    = NULL;
+CLibretroEnvironment::SetDiskControlCallback_t CLibretroEnvironment::fn_SetDiskControlCallback = NULL;
+CLibretroEnvironment::SetRenderCallback_t      CLibretroEnvironment::fn_SetRenderCallback      = NULL;
 
 GameClientPtr CLibretroEnvironment::m_activeClient;
 CStdString    CLibretroEnvironment::m_systemDirectory;
+std::map<CStdString, CStdString> CLibretroEnvironment::m_varMap;
 bool          CLibretroEnvironment::m_bAbort = false;
 
-void CLibretroEnvironment::SetCallbacks(SetPixelFormat_t spf, SetKeyboardCallback_t skc, GameClientPtr activeClient)
+void CLibretroEnvironment::SetCallbacks(SetPixelFormat_t spf, SetKeyboardCallback_t skc,
+                                        SetDiskControlCallback_t sdcc, SetRenderCallback_t src,
+                                        GameClientPtr activeClient)
 {
   fn_SetPixelFormat = spf;
   fn_SetKeyboardCallback = skc;
+  fn_SetDiskControlCallback = sdcc;
+  fn_SetRenderCallback = src;
   m_activeClient = activeClient;
   m_bAbort = false;
 }
@@ -52,25 +76,32 @@ void CLibretroEnvironment::ResetCallbacks()
 {
   fn_SetPixelFormat = NULL;
   fn_SetKeyboardCallback = NULL;
+  fn_SetDiskControlCallback = NULL;
+  fn_SetRenderCallback = NULL;
   m_activeClient.reset();
 }
 
 bool CLibretroEnvironment::EnvironmentCallback(unsigned int cmd, void *data)
 {
-  static const char *cmds[] = {"RETRO_ENVIRONMENT_SET_ROTATION",
-                               "RETRO_ENVIRONMENT_GET_OVERSCAN",
-                               "RETRO_ENVIRONMENT_GET_CAN_DUPE",
-                               "RETRO_ENVIRONMENT_GET_VARIABLE",
-                               "RETRO_ENVIRONMENT_SET_VARIABLES",
-                               "RETRO_ENVIRONMENT_SET_MESSAGE",
-                               "RETRO_ENVIRONMENT_SHUTDOWN",
-                               "RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL",
-                               "RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY",
-                               "RETRO_ENVIRONMENT_SET_PIXEL_FORMAT",
-                               "RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS",
-                               "RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK"};
+  static const char *cmds[] = {"SET_ROTATION",
+                               "GET_OVERSCAN",
+                               "GET_CAN_DUPE",
+                               NULL, // reserved (no longer supported)
+                               NULL, // reserved (no longer supported)
+                               "SET_MESSAGE",
+                               "SHUTDOWN",
+                               "SET_PERFORMANCE_LEVEL",
+                               "GET_SYSTEM_DIRECTORY",
+                               "SET_PIXEL_FORMAT",
+                               "SET_INPUT_DESCRIPTORS",
+                               "SET_KEYBOARD_CALLBACK",
+                               "SET_DISK_CONTROL_INTERFACE",
+                               "SET_HW_RENDER",
+                               "GET_VARIABLE",
+                               "SET_VARIABLES",
+                               "GET_VARIABLE_UPDATE"};
 
-  if (0 <= cmd && cmd < sizeof(cmds) / sizeof(cmds[0]))
+  if (0 <= cmd && cmd < sizeof(cmds) / sizeof(cmds[0]) && cmds[cmd - 1])
     CLog::Log(LOGINFO, "CLibretroEnvironment query ID=%d: %s", cmd, cmds[cmd - 1]);
   else
   {
@@ -101,56 +132,6 @@ bool CLibretroEnvironment::EnvironmentCallback(unsigned int cmd, void *data)
       *reinterpret_cast<bool*>(data) = true;
       CLog::Log(LOGINFO, "CLibretroEnvironment query ID=%d: frame duping is %s", cmd,
         *reinterpret_cast<bool*>(data) ? "enabled" : "disabled");
-      break;
-    }
-  case RETRO_ENVIRONMENT_GET_VARIABLE:
-    {
-      // Interface to acquire user-defined information from environment that cannot feasibly be
-      // supported in a multi-system way. Mostly used for obscure, specific features that the
-      // user can tap into when necessary.
-      retro_variable *var = reinterpret_cast<retro_variable*>(data);
-      if (var->key && var->value)
-      {
-        // For example...
-        if (strncmp("too_sexy_for", var->key, 12) == 0)
-        {
-          var->value = "my_shirt";
-          CLog::Log(LOGINFO, "CLibretroEnvironment query ID=%d: variable %s set to %s", cmd, var->key, var->value);
-        }
-        else
-        {
-          var->value = NULL;
-          CLog::Log(LOGERROR, "CLibretroEnvironment query ID=%d: undefined variable %s", cmd, var->key);
-        }
-      }
-      else
-      {
-        if (var->value)
-          var->value = NULL;
-        CLog::Log(LOGERROR, "CLibretroEnvironment query ID=%d: no variable given", cmd);
-      }
-      break;
-    }
-  case RETRO_ENVIRONMENT_SET_VARIABLES:
-    {
-      // Allows an implementation to signal the environment which variables it might want to check
-      // for later using GET_VARIABLE. 'data' points to an array of retro_variable structs terminated
-      // by a { NULL, NULL } element. retro_variable::value should contain a human readable description
-      // of the key.
-      const retro_variable *vars = reinterpret_cast<const retro_variable*>(data);
-      if (!vars->key)
-        CLog::Log(LOGERROR, "CLibretroEnvironment query ID=%d: no variables given", cmd);
-      else
-      {
-        while (vars && vars->key)
-        {
-          if (vars->value)
-            CLog::Log(LOGINFO, "CLibretroEnvironment query ID=%d: notified of var %s (%s)", cmd, vars->key, vars->value);
-          else
-            CLog::Log(LOGWARNING, "CLibretroEnvironment query ID=%d: var %s has no description", cmd, vars->key);
-          vars++;
-        }
-      }
       break;
     }
   case RETRO_ENVIRONMENT_SET_MESSAGE:
@@ -326,6 +307,245 @@ bool CLibretroEnvironment::EnvironmentCallback(unsigned int cmd, void *data)
         fn_SetKeyboardCallback(callback_struct->callback);
       break;
     }
+  case RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE:
+    {
+      // Sets an interface to eject and insert disk images. This is used for games which
+      // consist of multiple images and must be manually swapped out by the user (e.g. PSX).
+      const retro_disk_control_callback *disk_control_cb = reinterpret_cast<const retro_disk_control_callback*>(data);
+      if (fn_SetDiskControlCallback)
+        fn_SetDiskControlCallback(disk_control_cb);
+      break;
+    }
+  case RETRO_ENVIRONMENT_SET_HW_RENDER:
+    {
+      // Sets an interface to let a libretro core render with hardware acceleration.
+      // This call is currently very experimental
+      const retro_hw_render_callback *hw_render_cb = reinterpret_cast<const retro_hw_render_callback*>(data);
+      if (fn_SetRenderCallback)
+        fn_SetRenderCallback(hw_render_cb);
+      break;
+    }
+  case RETRO_ENVIRONMENT_GET_VARIABLE:
+    {
+      // Interface to acquire user-defined information from environment that
+      // cannot feasibly be supported in a multi-system way. Mostly used for
+      // obscure, specific features that the user can tap into when necessary.
+      retro_variable *var = reinterpret_cast<retro_variable*>(data);
+      if (var->key && var->value)
+      {
+        // m_varMap provides both a static layer for returning persistent strings,
+        // and a way of detecting stale data for RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE
+        if (false && m_activeClient)
+          m_varMap[var->key] = m_activeClient->GetSetting(var->key);
+        else
+          m_varMap[var->key] = "";
+
+        if (false && m_varMap[var->key].length())
+        {
+          var->value = m_varMap[var->key].c_str();
+          CLog::Log(LOGINFO, "CLibretroEnvironment query ID=%d: variable %s set to %s", cmd, var->key, var->value);
+        }
+        else
+        {
+          var->value = NULL;
+          CLog::Log(LOGERROR, "CLibretroEnvironment query ID=%d: undefined variable %s", cmd, var->key);
+        }
+      }
+      else
+      {
+        if (var->value)
+          var->value = NULL;
+        CLog::Log(LOGERROR, "CLibretroEnvironment query ID=%d: no variable given", cmd);
+      }
+      break;
+    }
+  case RETRO_ENVIRONMENT_SET_VARIABLES:
+    {
+      // Allows an implementation to define its configuration options. 'data'
+      // points to an array of retro_variable structs terminated by a
+      // { NULL, NULL } element.
+      const retro_variable *vars = reinterpret_cast<const retro_variable*>(data);
+      if (!vars->key)
+        CLog::Log(LOGERROR, "CLibretroEnvironment query ID=%d: no variables given", cmd);
+      else
+      {
+        vector<TiXmlElement> xmlSettings;
+        m_varMap.clear();
+
+        while (vars && vars->key)
+        {
+          if (vars->value)
+          {
+            CLog::Log(LOGINFO, "CLibretroEnvironment query ID=%d: notified of var %s (%s)", cmd, vars->key, vars->value);
+            TiXmlElement setting("setting");
+            if (ParseVariable(*vars, setting, m_varMap[vars->key])) // m_varMap[vars->key] is always created
+              xmlSettings.push_back(setting);
+            else
+              CLog::Log(LOGWARNING, "CLibretroEnvironment query ID=%d: error parsing variable");
+          }
+          else
+            CLog::Log(LOGWARNING, "CLibretroEnvironment query ID=%d: var %s has no value", cmd, vars->key);
+          vars++;
+        }
+
+        if (m_activeClient)
+          m_activeClient->SetVariables(xmlSettings);
+      }
+      break;
+    }
+  case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
+    {
+      // Indicate that environment variables are stale and should be re-queried with GET_VARIABLE.
+      bool stale = false;
+      if (m_activeClient)
+      {
+        for (map<CStdString, CStdString>::const_iterator it = m_varMap.begin(); !stale && it != m_varMap.end(); it++)
+          if (it->second.empty() || it->second != m_activeClient->GetSetting(it->first))
+            stale = true;
+      }
+      *reinterpret_cast<bool*>(data) = stale;
+      break;
+    }
   }
+  return true;
+}
+
+bool CLibretroEnvironment::ParseVariable(const retro_variable &var, TiXmlElement &xmlSetting, CStdString &strDefault)
+{
+  // Variable parsing follows a very procedural approach heavily grounded in C-think:
+  // the value contains a description, a delimiting semicolon, a pipe-separated
+  // list of values, and cries at the sight of object-oriented programming.
+  // Example setting: "Speed hack coprocessor X; false|true"
+  CStdString description;
+  CStdString strValues(var.value);
+  CStdStringArray values;
+  unsigned short setting = SETTING_TYPE_NONE;
+
+  // Boolean labels. For canonicalization purposes, make sure even strings are
+  // synonymous with true and odd strings with false; NULL is allowed anywhere
+  // if the count becomes uneven.
+  const char *boolsetting[] = {"true", "false", "yes", "no"};
+
+  stringstream strRegBool;
+  strRegBool << "^(" << boolsetting[0];
+  for (size_t i = 1; i < sizeof(boolsetting) / sizeof(boolsetting[0]); i++)
+    if (boolsetting[i])
+      strRegBool << '|' << boolsetting[i];
+  strRegBool << ")$";
+
+  CRegExp regBool, regIpAddress, regInt, regFloat, regPercent;
+  if (!regBool.RegComp(strRegBool.str()) ||
+      !regIpAddress.RegComp("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$") || // Match to #.#.#.#
+      !regInt.RegComp("^[0-9]+$") ||
+      !regFloat.RegComp("^[0-9]*\\.[0-9]+$") ||
+      !regPercent.RegComp("^[0-9]+%$"))
+    return false;
+
+  size_t pos;
+  if ((pos = strValues.find(';')) != string::npos)
+  {
+    description = strValues.substr(0, pos);
+    description = description.Trim();
+    strValues = strValues.substr(pos + 1);
+  }
+
+  if (description.empty())
+    description = var.key;
+
+  StringUtils::SplitString(strValues, "|", values);
+
+  // Infer setting type based on number and format of values
+  if (!values.size())
+    return false;
+  if (values.size() == 1)
+    setting |= (SETTING_TYPE_TEXT | SETTING_TYPE_IPADDRESS | SETTING_TYPE_NUMBER);
+  if (values.size() == 2)
+    setting |= SETTING_TYPE_BOOL;
+  if (values.size() > 1)
+    setting |= (SETTING_TYPE_SLIDER_INT | SETTING_TYPE_SLIDER_FLOAT | SETTING_TYPE_SLIDER_PERCENT | SETTING_TYPE_ENUM);
+
+  for (CStdStringArray::iterator it = values.begin(); it != values.end(); it++)
+  {
+    (*it) = it->Trim();
+
+    // Discard invalid settings types
+    struct FilterTypes
+    {
+      CRegExp *regex;
+      unsigned short setting;
+    };
+    FilterTypes filters[] =
+    {
+      { &regBool,      SETTING_TYPE_BOOL },
+      { &regIpAddress, SETTING_TYPE_IPADDRESS },
+      { &regInt,       SETTING_TYPE_NUMBER },
+      { &regInt,       SETTING_TYPE_SLIDER_INT },
+      { &regFloat,     SETTING_TYPE_SLIDER_FLOAT },
+      { &regPercent,   SETTING_TYPE_SLIDER_PERCENT },
+    };
+    for (size_t i = 0; i < sizeof(filters) / sizeof(filters[0]); i++)
+      if ((setting & filters[i].setting) && filters[i].regex->RegFind(*it) < 0)
+        setting &= ~filters[i].setting;
+  }
+
+  // Got our type, construct final XML element. If two types are superimposed,
+  // i.e. SETTING_TYPE_BOOL | SETTING_TYPE_ENUM, choose the more specific one.
+  xmlSetting.SetAttribute("id", var.key);
+  xmlSetting.SetAttribute("label", description.c_str());
+
+  if (setting & SETTING_TYPE_BOOL)
+  {
+    // Canonicalize the default value
+    for (size_t i = 0; i < sizeof(boolsetting) / sizeof(boolsetting[0]); i++)
+      if (boolsetting[i] && values[0].Equals(boolsetting[i]))
+        { values[0] = (i % 2 == 0 ? "true" : "false"); break; }
+    xmlSetting.SetAttribute("type", "bool");
+  }
+  else if (setting & SETTING_TYPE_TEXT)
+    xmlSetting.SetAttribute("type", "text");
+  else if (setting & SETTING_TYPE_IPADDRESS)
+    xmlSetting.SetAttribute("type", "ipaddress");
+  else if (setting & SETTING_TYPE_NUMBER)
+    xmlSetting.SetAttribute("type", "number");
+  else if ((setting & SETTING_TYPE_SLIDER_INT) || (setting & SETTING_TYPE_SLIDER_PERCENT))
+  {
+    bool percent = (setting & SETTING_TYPE_SLIDER_PERCENT) != 0;
+    vector<long int> intValues;
+    for (CStdStringArray::const_iterator it = values.begin(); it != values.end(); it++)
+      intValues.push_back(strtol(it->c_str(), NULL, 10));
+    
+    // TODO: Euclid's GCD
+    int min = 0;
+    int step = 5;
+    int max = 100;
+    int count = 21;
+
+    // Only allow linear steps
+    bool valid = (min + step * (count - 1) == max);
+    if (valid && false)
+    {
+      CStdString range;
+      range.Format("%d,%d,%d", min, step, max);
+      xmlSetting.SetAttribute("type", "slider");
+      xmlSetting.SetAttribute("option", percent ? "percent" : "int");
+      xmlSetting.SetAttribute("range", range.c_str());
+    }
+    else
+    {
+      // Fall back to a simple enum
+      StringUtils::JoinString(values, "|", strValues);
+      xmlSetting.SetAttribute("type", "enum");
+      xmlSetting.SetAttribute("values", strValues.c_str());
+    }
+  }
+  else if ((setting & SETTING_TYPE_ENUM) || (setting & SETTING_TYPE_SLIDER_FLOAT))
+  {
+    StringUtils::JoinString(values, "|", strValues);
+    xmlSetting.SetAttribute("type", "enum");
+    xmlSetting.SetAttribute("values", strValues.c_str());
+  }
+  xmlSetting.SetAttribute("default", values[0].c_str());
+  strDefault = values[0].c_str();
+
   return true;
 }
