@@ -43,7 +43,7 @@ namespace ADDON
     CAddonDll(const AddonProps &props);
     CAddonDll(const cp_extension_t *ext);
     virtual ~CAddonDll();
-    AddonPtr Clone() const;
+    virtual AddonPtr Clone() const;
     virtual ADDON_STATUS GetStatus();
 
     // addon settings

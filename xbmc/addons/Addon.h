@@ -101,7 +101,7 @@ public:
   CAddon(const cp_extension_t *ext);
   CAddon(const cp_plugin_info_t *plugin);
   virtual ~CAddon() {}
-  virtual AddonPtr Clone(const AddonPtr& parent) const;
+  virtual AddonPtr Clone() const;
 
   /*! \brief Check whether the this addon can be configured or not
    \return true if the addon has settings, false otherwise
@@ -175,8 +175,7 @@ public:
 protected:
   friend class CAddonCallbacksAddon;
 
-  CAddon(const CAddon&); // protected as all copying is handled by Clone()
-  CAddon(const CAddon&, const AddonPtr&);
+  CAddon(const CAddon &rhs); // protected as all copying is handled by Clone()
   const AddonPtr Parent() const { return m_parent; }
   virtual void BuildLibName(const cp_extension_t *ext = NULL);
 

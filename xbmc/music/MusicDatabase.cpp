@@ -4470,7 +4470,7 @@ bool CMusicDatabase::GetScraperForPath(const CStdString& strPath, ADDON::Scraper
         ADDON::AddonPtr addon;
         if (!scraperUUID.empty() && ADDON::CAddonMgr::Get().GetAddon(scraperUUID, addon) && addon)
         {
-          info = boost::dynamic_pointer_cast<ADDON::CScraper>(addon->Clone(addon));
+          info = boost::dynamic_pointer_cast<ADDON::CScraper>(addon->Clone());
           if (!info)
             return false;
           // store this path's settings
@@ -4482,7 +4482,7 @@ bool CMusicDatabase::GetScraperForPath(const CStdString& strPath, ADDON::Scraper
         ADDON::AddonPtr defaultScraper;
         if (ADDON::CAddonMgr::Get().GetDefault(type, defaultScraper))
         {
-          info = boost::dynamic_pointer_cast<ADDON::CScraper>(defaultScraper->Clone(defaultScraper));
+          info = boost::dynamic_pointer_cast<ADDON::CScraper>(defaultScraper->Clone());
         }
       }
     }

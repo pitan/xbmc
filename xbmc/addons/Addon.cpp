@@ -292,9 +292,9 @@ CAddon::CAddon(const AddonProps &props)
   m_userSettingsLoaded = false;
 }
 
-CAddon::CAddon(const CAddon &rhs, const AddonPtr &parent)
+CAddon::CAddon(const CAddon &rhs)
   : m_props(rhs.Props())
-  , m_parent(parent)
+  , m_parent(rhs.Parent())
 {
   m_settings  = rhs.m_settings;
   m_addonXmlDoc = rhs.m_addonXmlDoc;
@@ -309,9 +309,9 @@ CAddon::CAddon(const CAddon &rhs, const AddonPtr &parent)
   m_checkedStrings  = false;
 }
 
-AddonPtr CAddon::Clone(const AddonPtr &parent) const
+AddonPtr CAddon::Clone() const
 {
-  return AddonPtr(new CAddon(*this, parent));
+  return AddonPtr(new CAddon(*this));
 }
 
 bool CAddon::MeetsVersion(const AddonVersion &version) const
